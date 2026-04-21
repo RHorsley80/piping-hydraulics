@@ -223,7 +223,7 @@ if st.session_state.segments:
 
 # Segment type selector
 segment_type = st.selectbox("Segment Type",
-    ["Pipe", "Reducer", "Enlarger", "Flow Split", "Flow Merge"])
+    ["Pipe", "Reducer", "Enlarger", "Flow Split", "Flow Merge", "Pump"])
 
 # Determine inlet conditions from previous segment or initial conditions
 if st.session_state.segments:
@@ -326,6 +326,110 @@ if segment_type == "Pipe":
 else:
     fitting_counts = {}
 
+    if segment_type == "Pump":
+        st.write(f"Incoming flow: {inherited_flow:.1f} GPM at {inherited_pressure:.2f} psia")
+
+        pump_type = st.radio("Pump Type",
+                             ["Centrifugal", "Positive Displacement"])
+
+        if pump_type == "Positive Displacement":
+            st.info(f"Flow rate inherited from upstream: {inherited_flow:.1f} GPM")
+            pump_mode = st.radio("Specify pump by",
+                                 ["Discharge Pressure (psia)",
+                                  "Differential Pressure (psi)"])
+        else:
+            pump_mode = st.radio("Specify pump by",
+                                 ["Discharge Pressure (psia)",
+                                  "Differential Pressure (psi)",
+                                  "Head-Flow Curve (centrifugal only)"])
+
+        # Input blocks — run for all valid mode/type combinations
+        if pump_mode == "Discharge Pressure (psia)":
+            pump_discharge_psia = st.number_input(
+                "Discharge Pressure (psia)",
+                min_value=float(inherited_pressure),
+                value=float(inherited_pressure) + 50.0)
+            pump_dp = pump_discharge_psia - inherited_pressure
+            st.info(f"Discharge pressure: {pump_discharge_psia:.2f} psia "
+                    f"(+{pump_dp:.2f} psi)")
+
+        elif pump_mode == "Differential Pressure (psi)":
+            pump_dp = st.number_input(
+                "Differential Pressure (psi)",
+                min_value=0.1, value=50.0)
+            pump_discharge_psia = inherited_pressure + pump_dp
+            st.info(f"Discharge pressure: {pump_discharge_psia:.2f} psia "
+                    f"(+{pump_dp:.2f} psi)")
+
+        elif pump_mode == "Head-Flow Curve (centrifugal only)":
+            st.write("Enter pump curve data points (minimum 3, maximum 7):")
+            st.caption("Tip: Include shutoff head (Q=0) and runout point for best fit")
+
+            num_points = st.slider("Number of curve points",
+                                   min_value=3, max_value=7, value=3)
+
+            curve_data = []
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Flow (GPM)**")
+            with col2:
+                st.write("**Head (ft)**")
+
+            for i in range(num_points):
+                col1, col2 = st.columns(2)
+                with col1:
+                    q = st.number_input(f"Q{i + 1}", min_value=0.0,
+                                        value=float(i * 100),
+                                        key=f"pump_q_{i}")
+                with col2:
+                    h = st.number_input(f"H{i + 1}", min_value=0.0,
+                                        value=float(200 - i * 30),
+                                        key=f"pump_h_{i}")
+                curve_data.append((q, h))
+
+            import numpy as np
+
+            flows = np.array([p[0] for p in curve_data])
+            heads = np.array([p[1] for p in curve_data])
+
+            if len(set(flows)) >= 3:
+                coeffs = np.polyfit(flows, heads, 2)
+                q_range = np.linspace(0, max(flows) * 1.1, 100)
+                h_fitted = np.polyval(coeffs, q_range)
+
+                fig_pump, ax_pump = plt.subplots(figsize=(8, 4))
+                ax_pump.plot(q_range, h_fitted, 'b-',
+                             linewidth=2, label='Fitted curve')
+                ax_pump.scatter(flows, heads, color='red',
+                                zorder=5, label='Input points')
+
+                h_operating = np.polyval(coeffs, inherited_flow)
+                ax_pump.scatter(inherited_flow, h_operating,
+                                color='green', s=200, zorder=6,
+                                marker='*', label='Operating point')
+                ax_pump.annotate(f"  {inherited_flow:.0f} GPM\n  {h_operating:.1f} ft",
+                                 xy=(inherited_flow, h_operating),
+                                 fontsize=9)
+
+                ax_pump.set_xlabel("Flow Rate (GPM)")
+                ax_pump.set_ylabel("Differential Head (ft)")
+                ax_pump.set_title("Pump Curve")
+                ax_pump.grid(True, alpha=0.3)
+                ax_pump.legend()
+                st.pyplot(fig_pump)
+                plt.close()
+
+                pump_dp = h_operating * density / 144
+                pump_discharge_psia = inherited_pressure + pump_dp
+
+                st.info(f"At {inherited_flow:.1f} GPM: "
+                        f"Head = {h_operating:.1f} ft, "
+                        f"ΔP = {pump_dp:.2f} psi, "
+                        f"Discharge = {pump_discharge_psia:.2f} psia")
+            else:
+                st.warning("Please enter at least 3 distinct flow values")
+                pump_dp = 0.0
+                pump_discharge_psia = inherited_pressure
     #The "add segment" button code
 
 if st.button("Add Segment"):
@@ -421,6 +525,39 @@ if st.button("Add Segment"):
                 'details': {},
                 'inlet_nps': upstream_nps,
                 'outlet_nps': upstream_nps,  # flow splits/merges don't change diameter
+            })
+
+        elif segment_type == "Pump":
+            # Validate pump_dp is defined
+            if pump_dp <= 0:
+                st.error("Pump must add pressure. Check your inputs.")
+                st.stop()
+
+            pump_label = (f"{pump_type} Pump - "
+                          f"{pump_mode.split('(')[0].strip()}")
+
+            upstream_nps = (st.session_state.segments[-1]['outlet_nps']
+                            if st.session_state.segments else 4.0)
+
+            st.session_state.segments.append({
+                'type': pump_label,
+                'flow_gpm': inherited_flow,  # PD inherits, centrifugal TBD
+                'inlet_pressure': inherited_pressure,
+                'outlet_pressure': pump_discharge_psia,
+                'velocity_fps': 0.0,
+                'reynolds': 0,
+                'friction_factor': 0.0,
+                'head_loss_ft': -(pump_dp * 144 / density),  # negative = energy added
+                'inlet_nps': upstream_nps,
+                'outlet_nps': upstream_nps,
+                'details': {
+                    'inputs': {
+                        'pump type': pump_type,
+                        'pump mode': pump_mode,
+                        'differential pressure (psi)': pump_dp,
+                        'flow (gpm)': inherited_flow
+                    }
+                }
             })
 
         st.rerun()
