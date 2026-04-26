@@ -34,22 +34,39 @@ if 'current_flow_gpm' not in st.session_state:
     st.session_state.current_flow_gpm = 100.0
 if 'current_pressure_psia' not in st.session_state:
     st.session_state.current_pressure_psia = 100.0
+if 'density' not in st.session_state:
+    st.session_state.density = 62.4
+if 'visc_cp' not in st.session_state:
+    st.session_state.visc_cp = 1.2
+if 'inlet_pressure' not in st.session_state:
+    st.session_state.inlet_pressure = 100.0
+if 'total_flow_gpm' not in st.session_state:
+    st.session_state.total_flow_gpm = 100.0
 
 # Fluid properties - entered once, inherited by all segments
 st.header("Fluid Properties")
 col1, col2, col3 = st.columns(3)
 with col1:
-    density = st.number_input("Density (lb/ft³)", min_value=0.1, value=62.4)
+    st.session_state.density = st.number_input(
+        "Density (lb/ft³)",
+        min_value=0.1,
+        value=st.session_state.density)
 with col2:
-    visc_cp = st.number_input("Viscosity (cP)", min_value=0.001, value=1.2)
+    st.session_state.visc_cp = st.number_input(
+        "Viscosity (cP)",
+        min_value=0.001,
+        value=st.session_state.visc_cp)
 with col3:
-    inlet_pressure = st.number_input("Inlet Pressure (psia)", min_value=0.1, value=100.0)
+    st.session_state.inlet_pressure = st.number_input(
+        "Inlet Pressure (psia)",
+        min_value=0.1,
+        value=st.session_state.inlet_pressure)
 
 st.header("Inlet Flow")
-total_flow_gpm = st.number_input("Total Flow Rate (GPM)", min_value=0.1, value=100.0)
-
-#Now, we can let the user define their system.
-st.header("Pipeline Segments")
+st.session_state.total_flow_gpm = st.number_input(
+    "Total Flow Rate (GPM)",
+    min_value=0.1,
+    value=st.session_state.total_flow_gpm)
 
 # Show existing segments summary if any exist
 
@@ -231,8 +248,8 @@ if st.session_state.segments:
     inherited_flow = last_seg['flow_gpm']
     inherited_pressure = last_seg['outlet_pressure']
 else:
-    inherited_flow = total_flow_gpm
-    inherited_pressure = inlet_pressure
+    inherited_flow = st.session_state.total_flow_gpm
+    inherited_pressure = st.session_state.inlet_pressure
 
 st.info(f"Inherited from upstream: {inherited_flow:.1f} GPM at {inherited_pressure:.2f} psia")
 
@@ -437,8 +454,8 @@ if st.button("Add Segment"):
         if segment_type == "Pipe":
             result = calc_pipe_segment_p2_psia(
                 inherited_flow, inherited_pressure, nps_inch, schedule,
-                material, density, elev1_ft, elev2_ft,
-                pipe_length_ft, fitting_counts, visc_cp)
+                material, st.session_state.density, elev1_ft, elev2_ft,
+                pipe_length_ft, fitting_counts, st.session_state.visc_cp)
 
             st.session_state.segments.append({
                 'type': f"Pipe - {nps_inch}\" Sch {schedule}",
@@ -468,7 +485,7 @@ if st.button("Add Segment"):
 
             k = calc_pipe_diameter_change_k(inlet_id, outlet_id, angle_degrees)
             velocity = inherited_flow / (7.4805 * 60) / (math.pi / 4 * (inlet_id / 12) ** 2)
-            dp = transition_dp(density, k, velocity)
+            dp = transition_dp(st.session_state.density, k, velocity)
             outlet_pressure = inherited_pressure - dp
 
             st.session_state.segments.append({
@@ -479,7 +496,7 @@ if st.button("Add Segment"):
                 'velocity_fps': velocity,
                 'reynolds': 0,
                 'friction_factor': 0,
-                'head_loss_ft': dp * 144 / density,
+                'head_loss_ft': dp * 144 / st.session_state.density,
                 'details': {},
                 'inlet_nps': inlet_nps,
                 'outlet_nps': outlet_nps
@@ -547,7 +564,7 @@ if st.button("Add Segment"):
                 'velocity_fps': 0.0,
                 'reynolds': 0,
                 'friction_factor': 0.0,
-                'head_loss_ft': -(pump_dp * 144 / density),  # negative = energy added
+                'head_loss_ft': -(pump_dp * 144 / st.session_state.density),  # negative = energy added
                 'inlet_nps': upstream_nps,
                 'outlet_nps': upstream_nps,
                 'details': {
