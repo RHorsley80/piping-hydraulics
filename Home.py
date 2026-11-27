@@ -42,10 +42,14 @@ if 'inlet_pressure' not in st.session_state:
     st.session_state.inlet_pressure = 100.0
 if 'total_flow_gpm' not in st.session_state:
     st.session_state.total_flow_gpm = 100.0
+if 'vapor_pressure_psia' not in st.session_state:
+    st.session_state.vapor_pressure_psia = 0.26       # water at about 60°F
+if 'critical_pressure_psia' not in st.session_state:
+    st.session_state.critical_pressure_psia = 3200.0  # water
 
 # Fluid properties - entered once, inherited by all segments
 st.header("Fluid Properties")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.session_state.density = st.number_input(
         "Density (lb/ft³)",
@@ -61,6 +65,17 @@ with col3:
         "Inlet Pressure (psia)",
         min_value=0.1,
         value=st.session_state.inlet_pressure)
+with col4:
+    st.session_state.vapor_pressure_psia = st.number_input(
+        "Vapor Pressure at flowing T (psia)",
+        min_value=0.001,
+        value=st.session_state.vapor_pressure_psia,
+        format="%.3f")
+with col5:
+    st.session_state.critical_pressure_psia = st.number_input(
+        "Critical Pressure (psia)",
+        min_value=1.0,
+        value=st.session_state.critical_pressure_psia)
 
 st.header("Inlet Flow")
 st.session_state.total_flow_gpm = st.number_input(

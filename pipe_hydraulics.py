@@ -6,6 +6,8 @@ import math
 from scipy.optimize import fsolve
 from reference_datatables import PIPE_ROUGHNESS_INCH, BWG_WALL_THICKNESS_INCH, FITTING_K_VALUES
 from fluids.piping import nearest_pipe, t_from_gauge
+from fluids import flow_meter as fm
+from scipy.optimize import brentq
 
 
 def calc_piping_velocity_fps(flow_rate_cfs, pipe_diam_inch):
@@ -386,3 +388,174 @@ def calc_flow_merge(
             'total_flow (gpm)': total_flow_gpm
         }
     }
+# ---------------- Control valves (incompressible liquid, Fp neglected) ----------------
+# TODO: Fp (piping geometry factor) for valves smaller than the line.
+# TODO: Reynolds-number correction (Fr) for viscous service; needs valve size.
+
+def calc_cv_required(flow_gpm, dp_psi, density_lb_ft3):
+    # ISA liquid equation: Q = Cv * sqrt(dP / Gf)
+    if flow_gpm <= 0:
+        raise ValueError("Flow must be positive")
+    if dp_psi <= 0:
+        raise ValueError("Valve pressure drop must be positive")
+    if density_lb_ft3 <= 0:
+        raise ValueError("Density must be positive")
+    gf = density_lb_ft3 / 62.4
+    return flow_gpm * math.sqrt(gf / dp_psi)
+
+
+def calc_valve_dp(flow_gpm, cv, density_lb_ft3):
+    if cv <= 0:
+        raise ValueError("Cv must be positive")
+    gf = density_lb_ft3 / 62.4
+    return gf * (flow_gpm / cv) ** 2
+
+
+def calc_cv_fraction_from_open(fraction_open, characteristic, rangeability=50.0):
+    # Returns Cv / Cv_max for a given fractional opening (0-1)
+    if not 0 < fraction_open <= 1:
+        raise ValueError("Fraction open must be between 0 and 1")
+    if characteristic == 'linear':
+        return fraction_open
+    if characteristic == 'equal_percentage':
+        return rangeability ** (fraction_open - 1)
+    if characteristic == 'quick_opening':
+        return math.sqrt(fraction_open)  # approximate; real curves vary by vendor
+    raise ValueError(f"Unknown characteristic '{characteristic}'")
+
+
+def calc_fraction_open_from_cv(cv_fraction, characteristic, rangeability=50.0):
+    # Inverse of the above: fractional opening needed for Cv / Cv_max
+    if cv_fraction <= 0:
+        raise ValueError("Cv fraction must be positive")
+    if cv_fraction > 1:
+        raise ValueError("Required Cv exceeds the valve's rated Cv. Choose a larger valve.")
+    if characteristic == 'linear':
+        return cv_fraction
+    if characteristic == 'equal_percentage':
+        if cv_fraction < 1 / rangeability:
+            raise ValueError("Required Cv is below the valve's rangeability limit. Choose a smaller valve.")
+        return 1 + math.log(cv_fraction) / math.log(rangeability)
+    if characteristic == 'quick_opening':
+        return cv_fraction ** 2
+    raise ValueError(f"Unknown characteristic '{characteristic}'")
+
+
+def calc_choked_dp(p1_psia, pv_psia, pc_psia, fl):
+    # dP_choked = FL^2 * (P1 - FF * Pv),  FF = 0.96 - 0.28 * sqrt(Pv / Pc)
+    ff = 0.96 - 0.28 * math.sqrt(pv_psia / pc_psia)
+    return fl ** 2 * (p1_psia - ff * pv_psia)
+
+# ---------------- Differential-pressure devices (orifice / nozzle / venturi) ----------------
+# Incompressible liquid only. Correlations (ISO 5167, ISO 15377) come from the `fluids` library.
+# US units in/out; SI conversion is confined to the helper below.
+_GPM_TO_M3S = 6.30902e-5
+_LBFT3_TO_KGM3 = 16.0185
+_PSI_TO_PA = 6894.757
+_IN_TO_M = 0.0254
+
+
+def _to_si(flow_gpm, line_id_in, density_lb_ft3, visc_cp, p1_psia):
+    rho = density_lb_ft3 * _LBFT3_TO_KGM3
+    return (line_id_in * _IN_TO_M, rho, visc_cp * 1e-3,
+            flow_gpm * _GPM_TO_M3S * rho, p1_psia * _PSI_TO_PA)
+
+
+def calc_dp_device_forward(flow_gpm, line_id_in, bore_in, density_lb_ft3, visc_cp,
+                           p1_psia, meter_type, taps=None):
+    """Given the bore, return tap dP, permanent loss, C, beta and pipe Reynolds number."""
+    if flow_gpm <= 0:
+        raise ValueError("Flow must be positive")
+    if not 0 < bore_in < line_id_in:
+        raise ValueError("Bore must be positive and smaller than the line ID")
+    D, rho, mu, m, P1 = _to_si(flow_gpm, line_id_in, density_lb_ft3, visc_cp, p1_psia)
+    d = bore_in * _IN_TO_M
+    try:
+        P2 = fm.differential_pressure_meter_solver(
+            D=D, rho=rho, mu=mu, D2=d, P1=P1, m=m,
+            meter_type=meter_type, taps=taps, epsilon_specified=1.0)
+    except Exception:
+        raise ValueError("Could not solve this device. The bore may be too small for the "
+                         "available inlet pressure.")
+    if P2 <= 0:
+        raise ValueError("Device differential exceeds the inlet pressure. Use a larger bore.")
+    C = fm.differential_pressure_meter_C_epsilon(
+        D=D, D2=d, m=m, P1=P1, P2=P2, rho=rho, mu=mu, k=1.4,
+        meter_type=meter_type, taps=taps, epsilon_specified=1.0)[0]
+    perm = fm.differential_pressure_meter_dP(D, d, P1, P2, C=C, meter_type=meter_type)
+    return {
+        'tap_dp_psi': (P1 - P2) / _PSI_TO_PA,
+        'perm_loss_psi': perm / _PSI_TO_PA,
+        'p2_tap_psia': P2 / _PSI_TO_PA,
+        'C': C,
+        'beta': bore_in / line_id_in,
+        're_pipe': 4.0 * m / (math.pi * D * mu),
+    }
+
+
+def calc_dp_device_bore_from_tap_dp(flow_gpm, line_id_in, tap_dp_psi, density_lb_ft3,
+                                    visc_cp, p1_psia, meter_type, taps=None):
+    """Bore (in) that gives the requested differential at the taps."""
+    if tap_dp_psi <= 0:
+        raise ValueError("Target differential must be positive")
+    if tap_dp_psi >= p1_psia:
+        raise ValueError("Target differential exceeds the inlet pressure")
+    D, rho, mu, m, P1 = _to_si(flow_gpm, line_id_in, density_lb_ft3, visc_cp, p1_psia)
+    try:
+        d = fm.differential_pressure_meter_solver(
+            D=D, rho=rho, mu=mu, P1=P1, P2=P1 - tap_dp_psi * _PSI_TO_PA, m=m,
+            meter_type=meter_type, taps=taps, epsilon_specified=1.0)
+    except Exception:
+        raise ValueError("No bore found for that differential. Check flow, ΔP and line size.")
+    if not 0 < d < D:
+        raise ValueError("No physical bore found for that differential.")
+    return d / _IN_TO_M
+
+
+def calc_dp_device_bore_from_perm_loss(flow_gpm, line_id_in, perm_loss_psi, density_lb_ft3,
+                                       visc_cp, p1_psia, meter_type, taps=None):
+    """Bore (in) that gives the requested permanent pressure loss (restriction orifice sizing)."""
+    if perm_loss_psi <= 0:
+        raise ValueError("Target pressure loss must be positive")
+    if perm_loss_psi >= p1_psia:
+        raise ValueError("Target pressure loss must be less than the inlet pressure")
+
+    def err(beta):
+        try:
+            r = calc_dp_device_forward(flow_gpm, line_id_in, beta * line_id_in,
+                                       density_lb_ft3, visc_cp, p1_psia, meter_type, taps)
+            return r['perm_loss_psi'] - perm_loss_psi
+        except ValueError:
+            return 1e9   # bore too small to pass the flow at this inlet pressure
+    lo, hi = 0.05, 0.95
+    if err(lo) * err(hi) > 0:
+        raise ValueError("No bore between 5% and 95% of the line ID gives that pressure loss. "
+                         "Consider multiple stages, or a different device.")
+    beta = brentq(err, lo, hi, xtol=1e-6)
+    if abs(err(beta)) > 0.01 * perm_loss_psi + 1e-3:   # guard against a jump in err(), not a true root
+        raise ValueError("No bore gives that pressure loss at this inlet pressure and flow.")
+    return beta * line_id_in
+
+
+def get_dp_device_warnings(limits, line_id_in, beta, re_pipe):
+    """Compare the operating point with the device's standard validity ranges."""
+    if not limits:
+        return ["Validity limits for this device are not checked here; consult ISO 15377 "
+                "or the vendor."]
+    w = []
+    d_mm = line_id_in * 25.4
+    lo, hi = limits['D_mm']
+    if not lo <= d_mm <= hi:
+        w.append(f"Line ID {d_mm:.0f} mm is outside the standard range ({lo}-{hi} mm).")
+    lo, hi = limits['beta']
+    if not lo <= beta <= hi:
+        w.append(f"Beta {beta:.3f} is outside the standard range ({lo}-{hi}).")
+    re_min = limits['re_min'](beta)
+    if re_pipe < re_min:
+        w.append(f"Pipe Reynolds number {re_pipe:,.0f} is below the standard minimum "
+                 f"({re_min:,.0f}); discharge coefficient is extrapolated.")
+    re_max = limits['re_max'](beta) if limits.get('re_max') else None
+    if re_max and re_pipe > re_max:
+        w.append(f"Pipe Reynolds number {re_pipe:,.0f} is above the standard maximum "
+                 f"({re_max:,.0f}).")
+    return w

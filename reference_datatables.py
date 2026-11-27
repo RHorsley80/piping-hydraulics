@@ -151,3 +151,71 @@ ENTRANCE_K_VALUES = {
 EXIT_K_VALUES = {
     'exit_all_types': 1.00
 }
+
+# Typical FL at full travel. Where the table gave a range, the LOW end is used,
+# which gives a lower choked dP and so a more conservative warning.
+# For design, use ANSI/ISA-75.01.01 or the vendor datasheet.
+VALVE_FL_DEFAULTS = {
+    'Globe, single-port, contoured plug, flow-to-open':        0.90,
+    'Globe, single-port, contoured plug, flow-to-close':       0.80,
+    'Globe, single-port, V-port plug or drilled-hole cage':    0.90,
+    'Globe, angle, contoured plug, flow-to-open':              0.85,
+    'Globe, angle, contoured plug, flow-to-close (venturi)':   0.45,
+    'Ball, full bore (70° open)':                              0.74,
+    'Ball, segmented / V-notch':                               0.60,
+    'Butterfly, swing-through (60° open)':                     0.70,
+    'Butterfly, swing-through (70° open)':                     0.62,
+    'Butterfly, high-performance eccentric (70°)':             0.67,
+    'Other / vendor data':                                     0.90,
+}
+
+VALVE_CHARACTERISTICS = {
+    'Linear': 'linear',
+    'Equal percentage': 'equal_percentage',
+    'Quick opening (approximate)': 'quick_opening',
+}
+
+# Differential-pressure devices. 'meter_type' strings are the `fluids` library's.
+# Validity limits: my recollection of ISO 5167 scope limits; verify against the standard.
+DP_DEVICES = {
+    'Orifice, concentric square-edged (ISO 5167)': {
+        'meter_type': 'ISO 5167 orifice',
+        'taps': {'Flange taps': 'flange', 'Corner taps': 'corner', 'D and D/2 taps': 'D'},
+        'limits': {'D_mm': (50, 1000), 'beta': (0.1, 0.75),
+                   're_min': lambda b: 5000 if b <= 0.56 else 16000 * b * b, 're_max': None},
+    },
+    'Orifice, eccentric (ISO 15377)': {
+        'meter_type': 'ISO 15377 eccentric orifice',
+        'taps': {'Flange taps': 'flange', 'Corner taps': 'corner', 'D and D/2 taps': 'D'},
+        'limits': None,
+    },
+    'Orifice, quarter-circle (ISO 15377)': {
+        'meter_type': 'ISO 15377 quarter-circle orifice', 'taps': None, 'limits': None,
+    },
+    'Nozzle, ISA 1932': {
+        'meter_type': 'ISA 1932 nozzle', 'taps': None,
+        'limits': {'D_mm': (50, 500), 'beta': (0.3, 0.8),
+                   're_min': lambda b: 7e4 if b < 0.44 else 2e4,
+                   're_max': lambda b: 1e7 if b < 0.44 else 2e6},
+    },
+    'Nozzle, long radius': {
+        'meter_type': 'long radius nozzle', 'taps': None,
+        'limits': {'D_mm': (50, 630), 'beta': (0.2, 0.8),
+                   're_min': lambda b: 1e4, 're_max': lambda b: 1e7},
+    },
+    'Venturi tube, as-cast convergent': {
+        'meter_type': 'as cast convergent venturi tube', 'taps': None,
+        'limits': {'D_mm': (100, 800), 'beta': (0.3, 0.75),
+                   're_min': lambda b: 2e5, 're_max': lambda b: 2e6},
+    },
+    'Venturi tube, machined convergent': {
+        'meter_type': 'machined convergent venturi tube', 'taps': None,
+        'limits': {'D_mm': (50, 250), 'beta': (0.4, 0.75),
+                   're_min': lambda b: 2e5, 're_max': lambda b: 1e6},
+    },
+    'Venturi tube, rough-welded convergent': {
+        'meter_type': 'rough welded convergent venturi tube', 'taps': None,
+        'limits': {'D_mm': (200, 1200), 'beta': (0.4, 0.7),
+                   're_min': lambda b: 2e5, 're_max': lambda b: 2e6},
+    },
+}
